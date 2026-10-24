@@ -1,4 +1,6 @@
 const http = require('http');
+const dgram = require('dgram');
+const dns = require('dns');
 const bedrock = require('bedrock-protocol');
 
 // ================= CONFIGURAÇÃO =================
@@ -20,6 +22,44 @@ let joinTimeout = null;
 
 const log = (...a) => console.log(`[${new Date().toISOString()}]`, ...a);
 const current_target = () => targets[targetIndex];
+
+// ============ TESTE DE REDE (diagnóstico) ============
+// Manda um "ping" UDP do tipo RakNet direto ao servidor, sem usar o bot,
+// para mostrar no log se a hospedagem consegue falar com o Minecraft.
+const RAK_MAGIC = Buffer.from('00ffff00fefefefefdfdfdfd12345678', 'hex');
+
+function probe(t) {
+  dns.lookup(t.host, { family: 4 }, (err, addr) => {
+    if (err) return log(`[teste] DNS falhou para ${t.host}: ${err.code}`);
+    log(`[teste] ${t.host} resolve para ${addr}`);
+    const sock = dgram.createSocket('udp4');
+    let done = false;
+    const finish = () => { if (!done) { done = true; try { sock.close(); } catch (_) {} } };
+    const pkt = Buffer.alloc(33);
+    pkt[0] = 0x01;
+    pkt.writeBigInt64BE(BigInt(Date.now()), 1);
+    RAK_MAGIC.copy(pkt, 9);
+    pkt.writeBigInt64BE(123456789n, 25);
+    const timer = setTimeout(() => {
+      log(`[teste] SEM RESPOSTA UDP de ${addr}:${t.port} em 6s -> a hospedagem não alcança o servidor por UDP, ou o servidor não está respondendo nesse endereço/porta`);
+      finish();
+    }, 6000);
+    sock.on('error', (e) => { clearTimeout(timer); log('[teste] erro de socket UDP:', e.code || e.message); finish(); });
+    sock.on('message', (msg) => {
+      clearTimeout(timer);
+      if (msg[0] === 0x1c && msg.length > 35) {
+        const len = msg.readUInt16BE(33);
+        const info = msg.slice(35, 35 + len).toString('utf8');
+        const f = info.split(';');
+        log(`[teste] UDP OK! O servidor respondeu: nome="${f[1]}" protocolo=${f[2]} versao=${f[3]} jogadores=${f[4]}/${f[5]}`);
+      } else {
+        log('[teste] UDP OK, mas a resposta veio em formato inesperado');
+      }
+      finish();
+    });
+    sock.send(pkt, t.port, addr, (e) => { if (e) { clearTimeout(timer); log('[teste] falha ao enviar UDP:', e.code || e.message); finish(); } });
+  });
+}
 
 function cleanup() {
   clearTimeout(joinTimeout);
@@ -50,6 +90,7 @@ function connect() {
   const t = current_target();
   status = `conectando em ${t.host}:${t.port}`;
   log(status);
+  probe(t);
 
   const opts = {
     host: t.host,
